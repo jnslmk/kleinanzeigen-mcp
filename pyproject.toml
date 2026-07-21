@@ -1,0 +1,24 @@
+[project]
+name = "kleinanzeigen-mcp"
+version = "0.1.0"
+description = "MCP server for Kleinanzeigen.de listing search"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "fastmcp>=3.4.4",
+]
+
+# Runtime also needs DanielWTE/ebay-kleinanzeigen-api (playwright, loguru, ...).
+# That is not a published package, so the Dockerfile clones it at a pinned
+# commit and installs its requirements.txt. See README.md.
+
+[project.scripts]
+kleinanzeigen-mcp = "kleinanzeigen_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["kleinanzeigen_mcp"]
