@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
+from playwright.async_api import BrowserContext
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -30,7 +31,7 @@ from starlette.responses import JSONResponse
 from scrapers.inserat import get_inserate_details_optimized
 from scrapers.inserate_by_url import scrape_by_url
 from scrapers.inserate_ultra_optimized import ultra_optimized_scrape_inserate
-from utils.browser import OptimizedPlaywrightManager
+from utils.browser import OptimizedPlaywrightManager, get_random_ua
 from utils.parse_kleinanzeigen_url import (
     map_to_inserate_params,
     parse_kleinanzeigen_url,
@@ -53,20 +54,93 @@ MAX_PAGE_COUNT = int(os.getenv("KZ_MAX_PAGE_COUNT", "5"))
 # Kleinanzeigen's bot detection.
 MAX_BATCH_SIZE = int(os.getenv("KZ_MAX_BATCH_SIZE", "20"))
 
-_browser: OptimizedPlaywrightManager | None = None
+_browser: SafePlaywrightManager | None = None
 
 
-def _manager() -> OptimizedPlaywrightManager:
+def _manager() -> SafePlaywrightManager:
     if _browser is None:  # pragma: no cover - guarded by the lifespan
         raise RuntimeError("Browser manager is not running")
     return _browser
+
+
+class SafePlaywrightManager(OptimizedPlaywrightManager):
+    """Context pool that cannot deadlock or leak contexts.
+
+    Upstream's ``get_context`` recurses into itself while still holding the
+    pool lock when every context is busy — ``asyncio.Lock`` is not reentrant,
+    so that recursion deadlocks the whole pool. Its ``release_context`` also
+    does slow I/O (``page.close``, ``clear_cookies``) under the same lock, so
+    any release blocked on the deadlock leaks its context out of the pool
+    permanently. LibreChat agents fire several MCP calls in parallel, which
+    exhausts the 4-context pool and reliably trips both bugs: every request —
+    parallel or not — then hangs until FastMCP kills it at its 180 s deadline,
+    and only a container restart recovers the pool.
+
+    Both methods are replaced here: waiters wait on an ``asyncio.Condition``
+    (the lock is released while waiting, so it cannot self-deadlock) and a
+    context is returned to the pool before its pages are cleaned up, so a
+    cancelled or slow cleanup can never leak it or wedge the pool.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._pool_condition = asyncio.Condition()
+
+    async def get_context(self) -> BrowserContext:
+        while True:
+            async with self._pool_condition:
+                if self._context_pool:
+                    context = self._context_pool.pop()
+                    self._context_in_use.append(context)
+                    self._contexts_reused += 1
+                    return context
+                if len(self._context_in_use) < self._max_contexts:
+                    context = await self._browser.new_context(
+                        user_agent=get_random_ua()
+                    )
+                    self._context_in_use.append(context)
+                    self._contexts_created += 1
+                    return context
+                # Every context is busy: wait for a release. Condition.wait()
+                # releases the lock, so concurrent releases can still run, and
+                # the wait is cancellable (FastMCP's request deadline).
+                try:
+                    await asyncio.wait_for(self._pool_condition.wait(), timeout=120)
+                except TimeoutError as exc:
+                    raise RuntimeError(
+                        "All browser contexts are busy and none freed up within "
+                        "120 s — Kleinanzeigen may be throttling this server"
+                    ) from exc
+
+    async def release_context(self, context: BrowserContext) -> None:
+        # Return the context to the pool before touching its pages, so a slow
+        # or cancelled cleanup can never leak it or block the pool.
+        keep = False
+        async with self._pool_condition:
+            if context not in self._context_in_use:
+                return
+            self._context_in_use.remove(context)
+            keep = len(self._context_pool) < self._max_contexts // 2
+            if keep:
+                self._context_pool.append(context)
+            self._pool_condition.notify_all()
+        # Best-effort cleanup outside the lock.
+        try:
+            if keep:
+                for page in list(context.pages):
+                    await page.close()
+                await context.clear_cookies()
+            else:
+                await context.close()
+        except BaseException:  # cleanup must never raise
+            pass
 
 
 @asynccontextmanager
 async def lifespan(_: FastMCP) -> AsyncIterator[None]:
     """Start one shared Chromium instance for the process lifetime."""
     global _browser
-    _browser = OptimizedPlaywrightManager(
+    _browser = SafePlaywrightManager(
         max_contexts=MAX_CONTEXTS, max_concurrent=MAX_CONCURRENT
     )
     await _browser.start()
@@ -84,7 +158,7 @@ async def lifespan(_: FastMCP) -> AsyncIterator[None]:
 
 mcp = FastMCP(
     name="kleinanzeigen",
-    version="0.1.0",
+    version="0.1.1",
     lifespan=lifespan,
     instructions=(
         "Search Kleinanzeigen.de, Germany's largest classifieds site, for "
@@ -147,6 +221,31 @@ def _parse_date(value: str | None, field: str) -> datetime | None:
         ) from exc
 
 
+def _coerce_int(
+    value: str | int | None, field: str, *, ge: int | None = None
+) -> int | None:
+    """Coerce the numeric strings LLMs routinely send for int parameters.
+
+    FastMCP validates tool input against the JSON schema before the function
+    runs, so a parameter typed ``int`` rejects the string ``"600"`` outright
+    (observed repeatedly for ``max_price``). Accepting ``str | int`` in the
+    schema and normalising here keeps the model-facing contract lenient while
+    the scraper still sees a real integer.
+    """
+    if value is None or isinstance(value, int):
+        result = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            result = int(value.strip())
+        except ValueError as exc:
+            raise ValueError(f"{field} must be an integer, got {value!r}") from exc
+    else:
+        raise ValueError(f"{field} must be an integer, got {value!r}")
+    if ge is not None and result is not None and result < ge:
+        raise ValueError(f"{field} must be >= {ge}, got {result}")
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # tools
 # --------------------------------------------------------------------------- #
@@ -163,14 +262,18 @@ async def search_listings(
         Field(description="City name or German postal code, e.g. 'Berlin' or '10115'"),
     ] = None,
     radius_km: Annotated[
-        int | None,
-        Field(description="Search radius around `location` in kilometres", ge=0),
+        str | int | None,
+        Field(description="Search radius around `location` in kilometres"),
     ] = None,
-    min_price: Annotated[int | None, Field(description="Minimum price in EUR", ge=0)] = None,
-    max_price: Annotated[int | None, Field(description="Maximum price in EUR", ge=0)] = None,
+    min_price: Annotated[
+        str | int | None, Field(description="Minimum price in EUR")
+    ] = None,
+    max_price: Annotated[
+        str | int | None, Field(description="Maximum price in EUR")
+    ] = None,
     page_count: Annotated[
-        int,
-        Field(description="Result pages to fetch, ~25 listings each", ge=1),
+        str | int,
+        Field(description="Result pages to fetch, ~25 listings each"),
     ] = 1,
     published_after: Annotated[
         str | None,
@@ -189,7 +292,10 @@ async def search_listings(
     seller details. Every filter is optional, but a search with no `query` and
     no `location` returns an arbitrary slice of the site and is rarely useful.
     """
-    page_count = min(page_count, MAX_PAGE_COUNT)
+    radius_km = _coerce_int(radius_km, "radius_km", ge=0)
+    min_price = _coerce_int(min_price, "min_price", ge=0)
+    max_price = _coerce_int(max_price, "max_price", ge=0)
+    page_count = min(_coerce_int(page_count, "page_count", ge=1) or 1, MAX_PAGE_COUNT)
     result = await ultra_optimized_scrape_inserate(
         browser_manager=_manager(),
         query=query,
@@ -235,8 +341,8 @@ async def get_listings_batch(
         Field(description="Listing ids to fetch, typically taken from a search"),
     ],
     max_concurrent: Annotated[
-        int,
-        Field(description="Detail pages to fetch in parallel", ge=1, le=5),
+        str | int,
+        Field(description="Detail pages to fetch in parallel"),
     ] = 2,
 ) -> dict[str, Any]:
     """Fetch full details for several listings in one call.
@@ -253,6 +359,7 @@ async def get_listings_batch(
         raise ValueError(
             f"Too many ids ({len(ids)}); fetch at most {MAX_BATCH_SIZE} per call"
         )
+    max_concurrent = min(_coerce_int(max_concurrent, "max_concurrent", ge=1) or 2, 5)
 
     manager = _manager()
     semaphore = asyncio.Semaphore(max_concurrent)
@@ -293,7 +400,7 @@ async def search_by_url(
         Field(description="A kleinanzeigen.de search or category URL"),
     ],
     max_pages: Annotated[
-        int, Field(description="Result pages to fetch, ~25 listings each", ge=1)
+        str | int, Field(description="Result pages to fetch, ~25 listings each")
     ] = 1,
     published_after: Annotated[
         str | None,
@@ -310,7 +417,7 @@ async def search_by_url(
     if "kleinanzeigen.de" not in url:
         raise ValueError("url must be a kleinanzeigen.de URL")
 
-    max_pages = min(max_pages, MAX_PAGE_COUNT)
+    max_pages = min(_coerce_int(max_pages, "max_pages", ge=1) or 1, MAX_PAGE_COUNT)
     result = await scrape_by_url(
         browser_manager=_manager(),
         base_url=url,
