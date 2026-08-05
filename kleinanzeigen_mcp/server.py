@@ -6,7 +6,8 @@ Upstream ships a FastAPI app; we skip it entirely and drive the scraper
 functions ourselves, so there is no second process and no HTTP hop.
 
 Upstream's scrapers take an ``OptimizedPlaywrightManager`` as an explicit first
-argument, so the only thing this module has to own is that manager's lifecycle.
+argument, so the only things this module has to own are that manager's
+lifecycle and the process-wide gate that queues concurrent tool calls.
 """
 
 from __future__ import annotations
@@ -44,6 +45,11 @@ log = logging.getLogger("kleinanzeigen-mcp")
 # an MCP server backing a chat agent handles one request at a time, so we run
 # far leaner by default and let the deployment raise it.
 MAX_CONTEXTS = int(os.getenv("KZ_MAX_CONTEXTS", "4"))
+
+# MAX_CONCURRENT caps how many MCP tool calls may scrape Kleinanzeigen at once,
+# process-wide. Chat agents (LibreChat) fire 4-8 calls in a burst, which trips
+# Kleinanzeigen's bot detection; the gate queues the excess calls instead of
+# scraping them in parallel.
 MAX_CONCURRENT = int(os.getenv("KZ_MAX_CONCURRENT", "2"))
 
 # Search responses are fed straight into an LLM context window, so page_count is
@@ -55,12 +61,19 @@ MAX_PAGE_COUNT = int(os.getenv("KZ_MAX_PAGE_COUNT", "5"))
 MAX_BATCH_SIZE = int(os.getenv("KZ_MAX_BATCH_SIZE", "20"))
 
 _browser: SafePlaywrightManager | None = None
+_scrape_gate: asyncio.Semaphore | None = None
 
 
 def _manager() -> SafePlaywrightManager:
     if _browser is None:  # pragma: no cover - guarded by the lifespan
         raise RuntimeError("Browser manager is not running")
     return _browser
+
+
+def _gate() -> asyncio.Semaphore:
+    if _scrape_gate is None:  # pragma: no cover - guarded by the lifespan
+        raise RuntimeError("Scrape gate is not running")
+    return _scrape_gate
 
 
 class SafePlaywrightManager(OptimizedPlaywrightManager):
@@ -139,11 +152,12 @@ class SafePlaywrightManager(OptimizedPlaywrightManager):
 @asynccontextmanager
 async def lifespan(_: FastMCP) -> AsyncIterator[None]:
     """Start one shared Chromium instance for the process lifetime."""
-    global _browser
+    global _browser, _scrape_gate
     _browser = SafePlaywrightManager(
         max_contexts=MAX_CONTEXTS, max_concurrent=MAX_CONCURRENT
     )
     await _browser.start()
+    _scrape_gate = asyncio.Semaphore(MAX_CONCURRENT)
     log.info(
         "Chromium ready (max_contexts=%s, max_concurrent=%s)",
         MAX_CONTEXTS,
@@ -154,11 +168,12 @@ async def lifespan(_: FastMCP) -> AsyncIterator[None]:
     finally:
         await _browser.close()
         _browser = None
+        _scrape_gate = None
 
 
 mcp = FastMCP(
     name="kleinanzeigen",
-    version="0.1.1",
+    version="0.1.2",
     lifespan=lifespan,
     instructions=(
         "Search Kleinanzeigen.de, Germany's largest classifieds site, for "
@@ -296,16 +311,18 @@ async def search_listings(
     min_price = _coerce_int(min_price, "min_price", ge=0)
     max_price = _coerce_int(max_price, "max_price", ge=0)
     page_count = min(_coerce_int(page_count, "page_count", ge=1) or 1, MAX_PAGE_COUNT)
-    result = await ultra_optimized_scrape_inserate(
-        browser_manager=_manager(),
-        query=query,
-        location=location,
-        radius=radius_km,
-        min_price=min_price,
-        max_price=max_price,
-        page_count=page_count,
-        min_publish_date=_parse_date(published_after, "published_after"),
-    )
+    min_publish_date = _parse_date(published_after, "published_after")
+    async with _gate():
+        result = await ultra_optimized_scrape_inserate(
+            browser_manager=_manager(),
+            query=query,
+            location=location,
+            radius=radius_km,
+            min_price=min_price,
+            max_price=max_price,
+            page_count=page_count,
+            min_publish_date=min_publish_date,
+        )
     return _normalize_search(result)
 
 
@@ -326,7 +343,8 @@ async def get_listing(
     if not listing_id:
         raise ValueError("listing_id must not be empty")
 
-    result = await get_inserate_details_optimized(_manager(), listing_id)
+    async with _gate():
+        result = await get_inserate_details_optimized(_manager(), listing_id)
     if not result.get("success"):
         if result.get("not_found"):
             return {"success": False, "status": "deleted", "id": listing_id}
@@ -349,8 +367,9 @@ async def get_listings_batch(
 
     The normal follow-up to `search_listings`. Failed ids are reported in
     `errors` rather than failing the whole call, so a deleted listing does not
-    lose you the rest. Keep `max_concurrent` low — Kleinanzeigen throttles
-    aggressive parallel access.
+    lose you the rest. The process-wide scrape gate (KZ_MAX_CONCURRENT) caps
+    parallel tool calls; `max_concurrent` only limits the detail fetches
+    inside this call.
     """
     ids = [i.strip() for i in listing_ids if i and i.strip()]
     if not ids:
@@ -362,15 +381,16 @@ async def get_listings_batch(
     max_concurrent = min(_coerce_int(max_concurrent, "max_concurrent", ge=1) or 2, 5)
 
     manager = _manager()
-    semaphore = asyncio.Semaphore(max_concurrent)
+    async with _gate():
+        semaphore = asyncio.Semaphore(max_concurrent)
 
-    async def fetch(listing_id: str) -> dict[str, Any]:
-        async with semaphore:
-            return await get_inserate_details_optimized(manager, listing_id)
+        async def fetch(listing_id: str) -> dict[str, Any]:
+            async with semaphore:
+                return await get_inserate_details_optimized(manager, listing_id)
 
-    outcomes = await asyncio.gather(
-        *(fetch(i) for i in ids), return_exceptions=True
-    )
+        outcomes = await asyncio.gather(
+            *(fetch(i) for i in ids), return_exceptions=True
+        )
 
     results: list[Any] = []
     errors: list[dict[str, str]] = []
@@ -418,12 +438,14 @@ async def search_by_url(
         raise ValueError("url must be a kleinanzeigen.de URL")
 
     max_pages = min(_coerce_int(max_pages, "max_pages", ge=1) or 1, MAX_PAGE_COUNT)
-    result = await scrape_by_url(
-        browser_manager=_manager(),
-        base_url=url,
-        max_pages=max_pages,
-        min_publish_date=_parse_date(published_after, "published_after"),
-    )
+    min_publish_date = _parse_date(published_after, "published_after")
+    async with _gate():
+        result = await scrape_by_url(
+            browser_manager=_manager(),
+            base_url=url,
+            max_pages=max_pages,
+            min_publish_date=min_publish_date,
+        )
     return _normalize_search(result)
 
 
