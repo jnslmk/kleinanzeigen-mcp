@@ -136,11 +136,15 @@ class SafePlaywrightManager(OptimizedPlaywrightManager):
             keep = len(self._context_pool) < self._max_contexts // 2
             if keep:
                 self._context_pool.append(context)
+            # Snapshot the pages BEFORE waking waiters: a waiter that pops
+            # this context can open a new page immediately, and the cleanup
+            # below must only close pages that existed at release time.
+            pages = list(context.pages)
             self._pool_condition.notify_all()
         # Best-effort cleanup outside the lock.
         try:
             if keep:
-                for page in list(context.pages):
+                for page in pages:
                     await page.close()
                 await context.clear_cookies()
             else:
