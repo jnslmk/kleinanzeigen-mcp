@@ -177,7 +177,7 @@ async def lifespan(_: FastMCP) -> AsyncIterator[None]:
 
 mcp = FastMCP(
     name="kleinanzeigen",
-    version="0.1.2",
+    version="0.1.3",
     lifespan=lifespan,
     instructions=(
         "Search Kleinanzeigen.de, Germany's largest classifieds site, for "
@@ -265,6 +265,55 @@ def _coerce_int(
     return result
 
 
+def _resolve_page_count(
+    page_count: str | int | None, max_pages: str | int | None
+) -> int:
+    """Accept either name for the page knob, on either search tool.
+
+    Upstream calls it ``page_count`` in the keyword scraper and ``max_pages`` in
+    the URL scraper, and that split leaked into the tool schemas: only
+    `search_listings` took ``page_count``, only `search_by_url` took
+    ``max_pages``, with byte-identical descriptions. FastMCP emits
+    ``additionalProperties: false``, so a model that carried one tool's name
+    over to the other got a hard schema rejection — and LibreChat's rejection
+    names no field ("Received tool input did not match expected schema"), so the
+    model cannot see what to fix and can only guess. Six such calls were
+    rejected in one conversation before the model happened to guess right.
+
+    Both tools now take both names, for the same reason `_normalize_search`
+    settles ``adid``/``id`` down to one: an LLM handed two names for one thing
+    will reach for the wrong one.
+    """
+    if page_count is not None and max_pages is not None:
+        resolved = _coerce_int(page_count, "page_count", ge=1)
+        alias = _coerce_int(max_pages, "max_pages", ge=1)
+        if resolved != alias:
+            raise ValueError(
+                "page_count and max_pages are two names for the same parameter "
+                f"but were given different values ({resolved} and {alias}); "
+                "pass page_count only"
+            )
+    elif max_pages is not None:
+        resolved = _coerce_int(max_pages, "max_pages", ge=1)
+    else:
+        resolved = _coerce_int(page_count, "page_count", ge=1)
+    return min(resolved or 1, MAX_PAGE_COUNT)
+
+
+# Shared by both search tools so the pair can never drift apart again. The alias
+# is declared in the schema rather than silently swallowed: an unknown key that
+# is quietly ignored would hand back page 1 while the model believed it had
+# asked for three.
+_PageCount = Annotated[
+    str | int | None,
+    Field(description="Result pages to fetch, ~25 listings each (default 1)"),
+]
+_MaxPagesAlias = Annotated[
+    str | int | None,
+    Field(description="Deprecated alias for `page_count`; prefer `page_count`"),
+]
+
+
 # --------------------------------------------------------------------------- #
 # tools
 # --------------------------------------------------------------------------- #
@@ -290,10 +339,7 @@ async def search_listings(
     max_price: Annotated[
         str | int | None, Field(description="Maximum price in EUR")
     ] = None,
-    page_count: Annotated[
-        str | int,
-        Field(description="Result pages to fetch, ~25 listings each"),
-    ] = 1,
+    page_count: _PageCount = None,
     published_after: Annotated[
         str | None,
         Field(
@@ -303,6 +349,7 @@ async def search_listings(
             )
         ),
     ] = None,
+    max_pages: _MaxPagesAlias = None,
 ) -> dict[str, Any]:
     """Search Kleinanzeigen listings by keyword, location and price.
 
@@ -314,7 +361,7 @@ async def search_listings(
     radius_km = _coerce_int(radius_km, "radius_km", ge=0)
     min_price = _coerce_int(min_price, "min_price", ge=0)
     max_price = _coerce_int(max_price, "max_price", ge=0)
-    page_count = min(_coerce_int(page_count, "page_count", ge=1) or 1, MAX_PAGE_COUNT)
+    pages = _resolve_page_count(page_count, max_pages)
     min_publish_date = _parse_date(published_after, "published_after")
     async with _gate():
         result = await ultra_optimized_scrape_inserate(
@@ -324,7 +371,7 @@ async def search_listings(
             radius=radius_km,
             min_price=min_price,
             max_price=max_price,
-            page_count=page_count,
+            page_count=pages,
             min_publish_date=min_publish_date,
         )
     return _normalize_search(result)
@@ -423,13 +470,12 @@ async def search_by_url(
         str,
         Field(description="A kleinanzeigen.de search or category URL"),
     ],
-    max_pages: Annotated[
-        str | int, Field(description="Result pages to fetch, ~25 listings each")
-    ] = 1,
+    page_count: _PageCount = None,
     published_after: Annotated[
         str | None,
         Field(description="Only return listings published at or after this ISO 8601 datetime"),
     ] = None,
+    max_pages: _MaxPagesAlias = None,
 ) -> dict[str, Any]:
     """Search using a Kleinanzeigen URL, preserving all of its filters.
 
@@ -441,13 +487,13 @@ async def search_by_url(
     if "kleinanzeigen.de" not in url:
         raise ValueError("url must be a kleinanzeigen.de URL")
 
-    max_pages = min(_coerce_int(max_pages, "max_pages", ge=1) or 1, MAX_PAGE_COUNT)
+    pages = _resolve_page_count(page_count, max_pages)
     min_publish_date = _parse_date(published_after, "published_after")
     async with _gate():
         result = await scrape_by_url(
             browser_manager=_manager(),
             base_url=url,
-            max_pages=max_pages,
+            max_pages=pages,
             min_publish_date=min_publish_date,
         )
     return _normalize_search(result)
