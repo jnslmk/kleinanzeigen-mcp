@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "kleinanzeigen-mcp",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "kleinanzeigen_mcp/server.py"
+      ]
+    }
+  }
+}
