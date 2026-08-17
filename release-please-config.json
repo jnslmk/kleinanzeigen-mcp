@@ -8,7 +8,8 @@
       "extra-files": [
         "kleinanzeigen_mcp/server.py"
       ],
-      "last-release-sha": "6931939adb3e37014447a18eddfee43b733f40cb"
+      "last-release-sha": "6931939adb3e37014447a18eddfee43b733f40cb",
+      "include-component-in-tag": false
     }
   }
 }
