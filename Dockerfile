@@ -4,7 +4,15 @@ ARG UPSTREAM_REPO=https://github.com/DanielWTE/ebay-kleinanzeigen-api.git
 # Pinned deliberately. We import upstream's scraper functions directly rather
 # than going through its HTTP API, so an unreviewed upstream refactor would
 # break this image at runtime. Bump this, rebuild, smoke-test, then ship.
-ARG UPSTREAM_SHA=1129536bb10e4d1c3b06e295beac0fe3f36f2a7d
+#
+# 2026-09-07 bump (1129536 -> da2fb02): Kleinanzeigen's Astro relaunch (early
+# Sept) dropped the old `.ad-listitem` card markup; upstream's own fix
+# (11781a9, "restore listing detection after Kleinanzeigen Astro relaunch")
+# restores adid/url/title/location but still misses price, description and
+# date, so patches/astro-results-fields.patch (applied below) adds fallbacks
+# for those. Keep the patch in sync when moving the pin — `git apply --check`
+# fails loudly on drift.
+ARG UPSTREAM_SHA=da2fb0204198253e6b798c0a4cadb06e73fd2438
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -18,11 +26,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+COPY patches /tmp/patches
+
 # Blob-filtered clone: fast, but unlike --depth=1 it can still check out an
-# arbitrary commit.
+# arbitrary commit. Apply our patch while .git still exists (`git apply`
+# needs it); --check fails the build loudly if the pinned checkout drifts.
 RUN git clone --filter=blob:none "${UPSTREAM_REPO}" upstream \
     && git -C upstream checkout --quiet "${UPSTREAM_SHA}" \
-    && rm -rf upstream/.git upstream/tests
+    && git -C upstream apply --check /tmp/patches/astro-results-fields.patch \
+    && git -C upstream apply /tmp/patches/astro-results-fields.patch \
+    && rm -rf upstream/.git upstream/tests /tmp/patches
 
 RUN pip install -r upstream/requirements.txt
 

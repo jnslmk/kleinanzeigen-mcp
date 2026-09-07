@@ -1,0 +1,92 @@
+diff --git a/scrapers/inserate_ultra_optimized.py b/scrapers/inserate_ultra_optimized.py
+index bb0259c..50beed4 100644
+--- a/scrapers/inserate_ultra_optimized.py
++++ b/scrapers/inserate_ultra_optimized.py
+@@ -259,6 +259,87 @@ class UltraOptimizedScraper:
+                 except Exception:
+                     pass
+ 
++            # The Astro relaunch dropped the classic price/description/date
++            # elements as well. Recover them from card content when the
++            # classic selectors missed: JSON-LD carries the full description,
++            # the price sits in the card's only `<p class="...font-strong">`,
++            # and the date is the span whose text the classic parser accepts
++            # ("Heute, 21:38" / "Gestern, 19:30" / "26.04.2026").
++            if not (
++                (isinstance(price_text, str) and price_text.strip())
++                and (isinstance(description_text, str) and description_text.strip())
++                and (isinstance(date_raw, str) and date_raw.strip())
++            ):
++                try:
++                    astro_fields = await article.evaluate(
++                        """(el) => {
++                            const out = { price: "", description: "", date: "" };
++                            const s = el.querySelector(
++                                'script[type="application/ld+json"]'
++                            );
++                            if (s) {
++                                try {
++                                    const j = JSON.parse(s.textContent);
++                                    if (j.description) out.description = j.description;
++                                } catch (e) {}
++                            }
++                            if (!out.description) {
++                                const p = el.querySelector(
++                                    "p[class*='text-bodyRegular']"
++                                );
++                                if (p && p.innerText && p.innerText.trim()) {
++                                    out.description = p.innerText.trim();
++                                }
++                            }
++                            const priceEl = el.querySelector(
++                                "p[class*='font-strong']"
++                            );
++                            if (priceEl && priceEl.innerText
++                                    && priceEl.innerText.trim()) {
++                                out.price = priceEl.innerText.trim();
++                            }
++                            const text = el.innerText || "";
++                            const lines = text
++                                .split("\\n")
++                                .map(line => line.trim())
++                                .filter(Boolean);
++                            if (!out.price) {
++                                const priceLine = lines.find(
++                                    line => /\\d[\\d.,]*\\s*(?:€|EUR)|(?:€|EUR)\\s*\\d/.test(line)
++                                            && line.length < 60
++                                );
++                                if (priceLine) out.price = priceLine;
++                            }
++                            const dateLine = lines.find(
++                                line => /^(Heute|Gestern), \\d{1,2}:\\d{2}$/.test(line)
++                                        || /^\\d{1,2}\\.\\d{1,2}\\.\\d{4}$/.test(line)
++                            );
++                            if (dateLine) out.date = dateLine;
++                            return out;
++                        }"""
++                    )
++                    if isinstance(astro_fields, dict):
++                        if (
++                            not (isinstance(price_text, str) and price_text.strip())
++                            and astro_fields.get("price")
++                        ):
++                            price_text = astro_fields["price"]
++                        if (
++                            not (
++                                isinstance(description_text, str)
++                                and description_text.strip()
++                            )
++                            and astro_fields.get("description")
++                        ):
++                            description_text = astro_fields["description"]
++                        if (
++                            not (isinstance(date_raw, str) and date_raw.strip())
++                            and astro_fields.get("date")
++                        ):
++                            date_raw = astro_fields["date"]
++                except Exception:
++                    pass
++
+             if isinstance(price_text, str):
+                 price_text = (
+                     price_text.replace("€", "")

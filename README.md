@@ -99,6 +99,15 @@ second process and an HTTP hop, but it means an upstream refactor can break this
 image at runtime rather than at build time. Bump the SHA, rebuild, smoke-test
 each tool, then ship.
 
+`patches/astro-results-fields.patch` rides on top of the pin: Kleinanzeigen's
+Astro relaunch (Sept 2026) dropped the classic card markup, and upstream's own
+fix restored adid/url/title/location but not price, description or date — the
+patch adds card-content fallbacks for those three. The Dockerfile applies it
+with `git apply --check`, so when the pin moves past code the patch no longer
+fits, the build fails loudly instead of silently shipping a regression.
+Upstream absorbing this fix is the exit condition for the patch — drop it the
+moment a newer pin makes it redundant.
+
 ## Images
 
 `ghcr.io/jnslmk/kleinanzeigen-mcp` — multi-arch (`linux/amd64`, `linux/arm64`),
