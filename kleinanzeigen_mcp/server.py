@@ -232,7 +232,7 @@ async def lifespan(_: FastMCP) -> AsyncIterator[None]:
 
 mcp = FastMCP(
     name="kleinanzeigen",
-    version="0.1.4",  # x-release-please-version
+    version="0.1.5",  # x-release-please-version
     lifespan=lifespan,
     instructions=(
         "Search Kleinanzeigen.de, Germany's largest classifieds site, for "
