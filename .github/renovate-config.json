@@ -1,0 +1,40 @@
+{
+  "branchPrefix": "renovate/",
+  "platform": "github",
+  "repositories": ["jnslmk/kleinanzeigen-mcp"],
+  "onboarding": false,
+  "requireConfig": "optional",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["custom.regex", "dockerfile", "github-actions"],
+  "prConcurrentLimit": 5,
+  "assignees": ["jnslmk"],
+  "assignAutomerge": true,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "ebay-kleinanzeigen-api commit pin in Dockerfile (upstream has no tags; tracks main HEAD so every upstream commit surfaces as a PR)",
+      "fileMatch": ["(^|/)Dockerfile$"],
+      "matchStrings": ["ARG UPSTREAM_SHA=(?<currentDigest>\\S+)"],
+      "currentValueTemplate": "main",
+      "depNameTemplate": "ebay-kleinanzeigen-api",
+      "packageNameTemplate": "https://github.com/DanielWTE/ebay-kleinanzeigen-api",
+      "datasourceTemplate": "git-refs"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Never automerge upstream scraper pins: any upstream commit can break the imported scraper functions or patches/",
+      "matchManagers": ["custom.regex"],
+      "automerge": false,
+      "labels": ["upstream-compat"]
+    },
+    {
+      "description": "Group and automerge Docker base image minor and patch updates",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "docker-minor-patch",
+      "automerge": true,
+      "automergeType": "pr"
+    }
+  ]
+}

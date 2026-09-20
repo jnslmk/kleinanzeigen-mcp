@@ -108,6 +108,28 @@ fits, the build fails loudly instead of silently shipping a regression.
 Upstream absorbing this fix is the exit condition for the patch — drop it the
 moment a newer pin makes it redundant.
 
+### Automated upstream updates
+
+Renovate watches upstream `main` and opens a PR bumping `UPSTREAM_SHA` within
+an hour of each upstream commit (hourly run dedicated to the pin; a weekly
+pass covers the base image). Pin PRs are never automerged, and the patch
+`--check` above is the compatibility gate: any PR whose pin outgrows the
+patch goes red in CI.
+
+Turning a red pin PR green is an AI-agent job: point a coding-agent session
+at the PR and have it review the upstream diff
+(`git diff <old-pin>..<new-pin>` in a clone of upstream), rework
+`patches/` if the touched code overlaps, confirm the build is green, then
+smoke-test each tool against the rebuilt image before merging. Green pin PRs
+still deserve the tool smoke test — a clean apply says nothing about runtime
+behavior of the imported functions.
+
+`RENOVATE_TOKEN` is a fine-grained GitHub PAT limited to this repository, with
+Contents, Commit statuses, Issues, Pull requests, and Workflows read/write plus
+Dependabot alerts read. It expires after 366 days; run
+`scripts/setup-renovate-token.sh` to create or rotate it and install the
+Actions secret without persisting its value locally.
+
 ## Images
 
 `ghcr.io/jnslmk/kleinanzeigen-mcp` — multi-arch (`linux/amd64`, `linux/arm64`),
