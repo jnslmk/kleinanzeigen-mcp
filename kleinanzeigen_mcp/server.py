@@ -15,10 +15,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 from fastmcp import FastMCP
 from playwright.async_api import BrowserContext
@@ -32,7 +34,7 @@ from starlette.responses import JSONResponse
 from scrapers.inserat import get_inserate_details_optimized
 from scrapers.inserate_by_url import scrape_by_url
 from scrapers.inserate_ultra_optimized import ultra_optimized_scrape_inserate
-from utils.browser import OptimizedPlaywrightManager, get_random_ua
+from utils.browser import OptimizedPlaywrightManager
 from utils.parse_kleinanzeigen_url import (
     map_to_inserate_params,
     parse_kleinanzeigen_url,
@@ -76,6 +78,28 @@ def _gate() -> asyncio.Semaphore:
     return _scrape_gate
 
 
+# Headless Chromium announces itself with a HeadlessChrome UA and whatever
+# locale the container has (usually en-US) — an instant bot flag on a German
+# site. Each context therefore gets a current desktop Chrome UA (Chrome 153 is
+# stable since 2026-09-08) plus Chrome's matching Accept headers, drawn once
+# and kept for the context's lifetime: a mid-scrape UA/header flip is itself a
+# fingerprinting signal.
+_CHROME_USER_AGENTS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+)
+_CHROME_EXTRA_HEADERS = {
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,"
+        "application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
+
 class SafePlaywrightManager(OptimizedPlaywrightManager):
     """Context pool that cannot deadlock or leak contexts.
 
@@ -93,11 +117,41 @@ class SafePlaywrightManager(OptimizedPlaywrightManager):
     (the lock is released while waiting, so it cannot self-deadlock) and a
     context is returned to the pool before its pages are cleaned up, so a
     cancelled or slow cleanup can never leak it or wedge the pool.
+
+    ``start`` is also replaced so the pre-warmed pool uses the same hardened
+    contexts as ``get_context`` below (see ``_CHROME_USER_AGENTS``), and
+    ``release_context`` no longer wipes cookies: the scrapers release and
+    re-acquire a context between pages of one logical session (every page
+    fetch is its own get/release cycle), so clearing here dropped the session
+    at every page boundary and re-raised the consent banner and bot heuristics
+    each time.
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._pool_condition = asyncio.Condition()
+
+    async def start(self) -> None:
+        await super().start()
+        # super() pre-warmed the pool via upstream's get_random_ua() and no
+        # extra headers; swap those contexts for hardened ones. An empty pool
+        # means upstream skipped the pre-warm (CDP browser) — don't add one.
+        if not self._context_pool:
+            return
+        for stale in self._context_pool:
+            await stale.close()
+        self._context_pool.clear()
+        self._contexts_created = 0
+        for _ in range(min(3, self._max_contexts)):
+            self._context_pool.append(await self._new_context())
+            self._contexts_created += 1
+
+    async def _new_context(self) -> BrowserContext:
+        """One consistent browser persona for the context's whole lifetime."""
+        return await self._browser.new_context(
+            user_agent=random.choice(_CHROME_USER_AGENTS),
+            extra_http_headers=_CHROME_EXTRA_HEADERS,
+        )
 
     async def get_context(self) -> BrowserContext:
         while True:
@@ -108,9 +162,7 @@ class SafePlaywrightManager(OptimizedPlaywrightManager):
                     self._contexts_reused += 1
                     return context
                 if len(self._context_in_use) < self._max_contexts:
-                    context = await self._browser.new_context(
-                        user_agent=get_random_ua()
-                    )
+                    context = await self._new_context()
                     self._context_in_use.append(context)
                     self._contexts_created += 1
                     return context
@@ -141,12 +193,14 @@ class SafePlaywrightManager(OptimizedPlaywrightManager):
             # below must only close pages that existed at release time.
             pages = list(context.pages)
             self._pool_condition.notify_all()
-        # Best-effort cleanup outside the lock.
+        # Best-effort cleanup outside the lock. Cookies are deliberately kept:
+        # a context's cookie jar is part of its persona (see _new_context),
+        # and the scrapers' get/release cycle per page means clearing here
+        # would reset it on every page boundary of one logical session.
         try:
             if keep:
                 for page in pages:
                     await page.close()
-                await context.clear_cookies()
             else:
                 await context.close()
         except BaseException:  # cleanup must never raise
@@ -314,6 +368,35 @@ _MaxPagesAlias = Annotated[
 ]
 
 
+def _validate_search_url(url: str) -> None:
+    """Require an https URL pointed at kleinanzeigen.de and nothing else.
+
+    The URL is handed straight to browser navigation, so the check must anchor
+    on the parsed host: a substring test waves through attacker URLs like
+    ``https://evil.example/?next=kleinanzeigen.de``. Userinfo and explicit
+    ports are rejected outright because real Kleinanzeigen links never carry
+    either.
+    """
+    parsed = urlparse(url)
+    # hostname is lowercased, so WWW.Kleinanzeigen.DE compares equal too.
+    host = parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"url is not a valid URL (bad port): {url!r}") from exc
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or port is not None
+        or host not in ("kleinanzeigen.de", "www.kleinanzeigen.de")
+    ):
+        raise ValueError(
+            "url must be an https://kleinanzeigen.de or "
+            f"https://www.kleinanzeigen.de URL, got {url!r}"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # tools
 # --------------------------------------------------------------------------- #
@@ -418,9 +501,10 @@ async def get_listings_batch(
 
     The normal follow-up to `search_listings`. Failed ids are reported in
     `errors` rather than failing the whole call, so a deleted listing does not
-    lose you the rest. The process-wide scrape gate (KZ_MAX_CONCURRENT) caps
-    parallel tool calls; `max_concurrent` only limits the detail fetches
-    inside this call.
+    lose you the rest: `success` is false only when *every* id failed, and
+    stays true with `partial` true when some succeeded. The process-wide scrape
+    gate (KZ_MAX_CONCURRENT) caps parallel tool calls; `max_concurrent` only
+    limits the detail fetches inside this call.
     """
     ids = [i.strip() for i in listing_ids if i and i.strip()]
     if not ids:
@@ -456,7 +540,8 @@ async def get_listings_batch(
             errors.append({"id": listing_id, "error": "fetch failed"})
 
     return {
-        "success": True,
+        "success": bool(results),
+        "partial": bool(results) and bool(errors),
         "requested": len(ids),
         "returned": len(results),
         "results": results,
@@ -484,8 +569,7 @@ async def search_by_url(
     year, fuel type, room count and so on — and this keeps every one of them.
     Page numbers are injected automatically.
     """
-    if "kleinanzeigen.de" not in url:
-        raise ValueError("url must be a kleinanzeigen.de URL")
+    _validate_search_url(url)
 
     pages = _resolve_page_count(page_count, max_pages)
     min_publish_date = _parse_date(published_after, "published_after")
