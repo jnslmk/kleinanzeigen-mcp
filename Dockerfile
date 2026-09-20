@@ -3,7 +3,9 @@ FROM python:3.12-slim-bookworm
 ARG UPSTREAM_REPO=https://github.com/DanielWTE/ebay-kleinanzeigen-api.git
 # Pinned deliberately. We import upstream's scraper functions directly rather
 # than going through its HTTP API, so an unreviewed upstream refactor would
-# break this image at runtime. Bump this, rebuild, smoke-test, then ship.
+# break this image at runtime. Renovate opens bump PRs automatically (upstream
+# main is watched hourly); merging still requires a green build, a reworked
+# patch if it drifted, and a smoke test — see README, "Upgrading the scraper".
 #
 # 2026-09-07 bump (1129536 -> da2fb02): Kleinanzeigen's Astro relaunch (early
 # Sept) dropped the old `.ad-listitem` card markup; upstream's own fix
