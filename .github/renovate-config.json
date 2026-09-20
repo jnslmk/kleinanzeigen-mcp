@@ -13,7 +13,7 @@
     {
       "customType": "regex",
       "description": "ebay-kleinanzeigen-api commit pin in Dockerfile (upstream has no tags; tracks main HEAD so every upstream commit surfaces as a PR)",
-      "fileMatch": ["(^|/)Dockerfile$"],
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
       "matchStrings": ["ARG UPSTREAM_SHA=(?<currentDigest>\\S+)"],
       "currentValueTemplate": "main",
       "depNameTemplate": "ebay-kleinanzeigen-api",
