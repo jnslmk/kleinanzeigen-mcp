@@ -150,6 +150,7 @@ class SafePlaywrightManager(OptimizedPlaywrightManager):
         """One consistent browser persona for the context's whole lifetime."""
         return await self._browser.new_context(
             user_agent=random.choice(_CHROME_USER_AGENTS),
+            locale="de-DE",
             extra_http_headers=_CHROME_EXTRA_HEADERS,
         )
 
@@ -384,10 +385,12 @@ def _validate_search_url(url: str) -> None:
         port = parsed.port
     except ValueError as exc:
         raise ValueError(f"url is not a valid URL (bad port): {url!r}") from exc
+    # `is not None`, not truthiness: https://@host (empty userinfo) parses to
+    # username '' and must be rejected like a named one.
     if (
         parsed.scheme != "https"
-        or parsed.username
-        or parsed.password
+        or parsed.username is not None
+        or parsed.password is not None
         or port is not None
         or host not in ("kleinanzeigen.de", "www.kleinanzeigen.de")
     ):
@@ -501,10 +504,11 @@ async def get_listings_batch(
 
     The normal follow-up to `search_listings`. Failed ids are reported in
     `errors` rather than failing the whole call, so a deleted listing does not
-    lose you the rest: `success` is false only when *every* id failed, and
-    stays true with `partial` true when some succeeded. The process-wide scrape
-    gate (KZ_MAX_CONCURRENT) caps parallel tool calls; `max_concurrent` only
-    limits the detail fetches inside this call.
+    lose you the rest: `success` is false only when *every* id failed, and a
+    mixed outcome shows up as `returned` < `requested` with non-empty
+    `errors`. The process-wide scrape gate (KZ_MAX_CONCURRENT) caps parallel
+    tool calls; `max_concurrent` only limits the detail fetches inside this
+    call.
     """
     ids = [i.strip() for i in listing_ids if i and i.strip()]
     if not ids:
@@ -541,7 +545,6 @@ async def get_listings_batch(
 
     return {
         "success": bool(results),
-        "partial": bool(results) and bool(errors),
         "requested": len(ids),
         "returned": len(results),
         "results": results,
