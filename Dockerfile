@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.13-slim-bookworm
 
 ARG UPSTREAM_REPO=https://github.com/DanielWTE/ebay-kleinanzeigen-api.git
 # Pinned deliberately. We import upstream's scraper functions directly rather
