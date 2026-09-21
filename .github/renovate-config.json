@@ -29,6 +29,12 @@
       "labels": ["upstream-compat"]
     },
     {
+      "description": "Keep Python below 3.14 until upstream dependencies publish compatible arm64 wheels",
+      "matchPackageNames": ["python"],
+      "allowedVersions": "<3.14",
+      "automerge": false
+    },
+    {
       "description": "Group and automerge Docker base image minor and patch updates",
       "matchManagers": ["dockerfile"],
       "matchUpdateTypes": ["minor", "patch"],
