@@ -30,7 +30,8 @@
     },
     {
       "description": "Keep Python below 3.14 until upstream dependencies publish compatible arm64 wheels",
-      "matchPackageNames": ["python"],
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["python", "docker.io/library/python"],
       "allowedVersions": "<3.14",
       "automerge": false
     },
