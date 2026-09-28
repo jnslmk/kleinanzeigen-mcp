@@ -85,7 +85,7 @@ claude mcp add --transport http kleinanzeigen http://localhost:8000/mcp
 uv venv && uv pip install -e .
 # The scrapers are not on PyPI, so point PYTHONPATH at a checkout of upstream:
 git clone https://github.com/DanielWTE/ebay-kleinanzeigen-api.git /tmp/kz-api
-pip install -r /tmp/kz-api/requirements.txt && playwright install chromium
+pip install aiohttp fastapi httpx loguru playwright python-multipart uvicorn uvloop && playwright install chromium
 PYTHONPATH=/tmp/kz-api python -m kleinanzeigen_mcp
 ```
 

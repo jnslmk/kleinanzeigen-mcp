@@ -39,7 +39,7 @@ RUN git clone --filter=blob:none "${UPSTREAM_REPO}" upstream \
     && git -C upstream apply /tmp/patches/astro-results-fields.patch \
     && rm -rf upstream/.git upstream/tests /tmp/patches
 
-RUN pip install -r upstream/requirements.txt
+RUN pip install aiohttp fastapi httpx loguru playwright python-multipart uvicorn uvloop
 
 # Ahead of the source copy: a ~100 MB browser download should not be redone
 # every time this project's own code changes.

@@ -9,9 +9,8 @@ dependencies = [
     "fastmcp>=3.4.4",
 ]
 
-# Runtime also needs DanielWTE/ebay-kleinanzeigen-api (playwright, loguru, ...).
-# That is not a published package, so the Dockerfile clones it at a pinned
-# commit and installs its requirements.txt. See README.md.
+# Runtime uses upstream's scraper modules; install their runtime dependencies
+# directly because upstream no longer ships requirements.txt.
 
 [project.scripts]
 kleinanzeigen-mcp = "kleinanzeigen_mcp.server:main"
