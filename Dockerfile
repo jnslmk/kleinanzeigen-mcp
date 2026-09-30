@@ -35,8 +35,8 @@ COPY patches /tmp/patches
 # needs it); --check fails the build loudly if the pinned checkout drifts.
 RUN git clone --filter=blob:none "${UPSTREAM_REPO}" upstream \
     && git -C upstream checkout --quiet "${UPSTREAM_SHA}" \
-    && git -C upstream apply --check /tmp/patches/astro-results-fields.patch \
-    && git -C upstream apply /tmp/patches/astro-results-fields.patch \
+    && git -C upstream apply --check /tmp/patches/*.patch \
+    && git -C upstream apply /tmp/patches/*.patch \
     && rm -rf upstream/.git upstream/tests /tmp/patches
 
 RUN pip install aiohttp fastapi httpx loguru playwright python-multipart uvicorn uvloop

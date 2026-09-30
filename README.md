@@ -108,6 +108,21 @@ fits, the build fails loudly instead of silently shipping a regression.
 Upstream absorbing this fix is the exit condition for the patch — drop it the
 moment a newer pin makes it redundant.
 
+`patches/price-filter-route.patch` keeps generic price-filter searches on the
+HTML route (`/s-preis:80:300/s-seite:1`). The old `/preis:80:300/...` route
+returns JSON with HTTP 200, which the HTML scraper silently treated as an empty
+successful search. Drop this patch when upstream corrects its URL builder.
+
+Run the live regression check against the deployed MCP after scraper updates:
+
+```bash
+python scripts/check-price-filters.py http://localhost:8000/mcp
+```
+
+It checks two-sided and one-sided bounds, numeric-string arguments, and
+multi-page searches, requiring usable listings whose numeric prices satisfy
+the requested bounds.
+
 ### Automated upstream updates
 
 Renovate watches upstream `main` and opens a PR bumping `UPSTREAM_SHA` within
