@@ -14,7 +14,7 @@ ARG UPSTREAM_REPO=https://github.com/DanielWTE/ebay-kleinanzeigen-api.git
 # date, so patches/astro-results-fields.patch (applied below) adds fallbacks
 # for those. Keep the patch in sync when moving the pin — `git apply --check`
 # fails loudly on drift.
-ARG UPSTREAM_SHA=da2fb0204198253e6b798c0a4cadb06e73fd2438
+ARG UPSTREAM_SHA=3b8452f30aacdab54ce2c0258b7610aa45aa5124
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
